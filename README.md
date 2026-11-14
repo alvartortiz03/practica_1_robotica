@@ -12,7 +12,7 @@ El robot simulado ejecuta varias trayectorias (Joint, Lineal y Circular). Mientr
 | Contrato de avisos de trayectoria (`trajectory_contract.py`) | Hecho |
 | Ejecutor de trayectorias Joint y Lineal | En desarrollo |
 | Trayectoria Circular y fichero launch | En desarrollo |
-| Opcional: guardar solo cuando el robot se mueve | En desarrollo |
+| Opcional: guardar solo cuando el robot se mueve | Hecho |
 | Opcional: mensaje ROS 2 propio | En desarrollo |
 
 ## Estructura del repositorio
@@ -98,6 +98,9 @@ Funcionamiento:
 - La posición y la velocidad vienen en el mensaje. La aceleración se calcula por diferencias finitas entre dos mensajes consecutivos: `a = (v_actual - v_anterior) / (t_actual - t_anterior)`.
 - Cada segundo muestra en el log el último estado calculado.
 - Mientras hay una trayectoria en curso, acumula sus muestras. Cuando termina, las guarda en un CSV propio.
+- Solo guarda las muestras tomadas **con el robot en movimiento**, es decir, cuando la mayor velocidad absoluta de sus articulaciones supera `MOTION_VELOCITY_THRESHOLD` (0,001 rad/s). En simulación, el robot quieto da velocidad 0 exacta y en movimiento alcanza décimas de rad/s, así que el umbral separa ambos casos con margen sin depender de un 0 exacto, que un robot real no daría por el ruido. Los periodos en reposo se descartan: antes de arrancar, al terminar y en las pausas entre movimientos. La aceleración se sigue calculando con todos los mensajes; solo se filtra lo que se guarda.
+- En el log solo se avisa cuando el robot empieza a moverse o se detiene, no con cada mensaje: con unos 500 mensajes por segundo, escribir siempre ralentiza el nodo y hace que se pierdan mensajes.
+- La suscripción a `/joint_states` tiene una cola de 100 mensajes (unos 200 ms a 500 Hz). Así, si el nodo está ocupado un momento, los mensajes esperan en la cola en lugar de perderse.
 
 ### Contrato de avisos (`trajectory_contract.py`)
 
@@ -109,7 +112,7 @@ El ejecutor de trayectorias y el registrador se comunican por el topic `/current
 
 ### Formato de los CSV
 
-Un fichero por trayectoria en `data/`, con el nombre `<trayectoria>_<AAAA-MM-DD_hh-mm-ss>.csv`, por ejemplo `joint_2026-11-14_19-45-09.csv`.
+Un fichero por trayectoria en `data/`, con el nombre `<trayectoria>_<AAAA-MM-DD_hh-mm-ss>.csv`, por ejemplo `joint_2026-11-14_19-45-09.csv`. La fecha y la hora son las de España (`Europe/Madrid`), aunque el contenedor funcione en UTC.
 
 | Columna | Unidad | Contenido |
 |---|---|---|
@@ -118,7 +121,7 @@ Un fichero por trayectoria en `data/`, con el nombre `<trayectoria>_<AAAA-MM-DD_
 | `vel_<articulación>` | rad/s | Velocidad de cada articulación |
 | `acc_<articulación>` | rad/s² | Aceleración de cada articulación |
 
-Las articulaciones aparecen en este orden: `shoulder_pan_joint`, `shoulder_lift_joint`, `elbow_joint`, `wrist_1_joint`, `wrist_2_joint`, `wrist_3_joint`. En total son 19 columnas y una fila por mensaje recibido (unas 500 por segundo).
+Las articulaciones aparecen en este orden: `shoulder_pan_joint`, `shoulder_lift_joint`, `elbow_joint`, `wrist_1_joint`, `wrist_2_joint`, `wrist_3_joint`. En total son 19 columnas y una fila por cada mensaje recibido con el robot en movimiento (unas 500 por segundo). Como las muestras en reposo no se guardan, si la trayectoria tiene una pausa la columna `time_sec` da un salto en ese punto.
 
 ## Calidad del código
 
@@ -132,4 +135,5 @@ Los tests comprueban PEP 8 con `flake8` (comillas simples, líneas de 99 caracte
 
 ## Limitaciones conocidas
 
-La aceleración calculada entre dos mensajes consecutivos (unos 2 ms) es sensible al ruido. El hardware simulado no se ejecuta en tiempo real: cuando un ciclo de control se retrasa, la velocidad publicada da un pequeño salto, y al dividirlo entre 2 ms aparecen picos de aceleración que no son reales. Calcularla sobre una ventana de 20 a 50 ms reduce mucho esos picos.
+- **Picos de aceleración.** La aceleración calculada entre dos mensajes consecutivos (unos 2 ms) es sensible al ruido. El hardware simulado no se ejecuta en tiempo real: cuando un ciclo de control se retrasa, la velocidad publicada da un pequeño salto, y al dividirlo entre 2 ms aparecen picos de aceleración que no son reales. Calcularla sobre una ventana de 20 a 50 ms reduce mucho esos picos.
+- **Paradas breves.** El filtro de movimiento decide muestra a muestra. Si una trayectoria frena casi a 0 durante un instante, por ejemplo en una esquina de un camino cartesiano, esas pocas muestras no se guardan.

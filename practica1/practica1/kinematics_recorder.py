@@ -9,9 +9,13 @@ se calcula por diferencias finitas entre dos mensajes consecutivos:
 a = (v_actual - v_anterior) / (t_actual - t_anterior). Cada PRINT_PERIOD_SEC
 segundos muestra en el log el último estado calculado.
 
-Además escucha los avisos del ejecutor de trayectorias (ver trajectory_contract):
-mientras hay una trayectoria en curso acumula sus muestras y, cuando termina,
-las guarda en un CSV propio dentro de la carpeta data/.
+Además escucha los avisos del ejecutor de trayectorias (ver trajectory_contract).
+Mientras hay una trayectoria en curso acumula sus muestras y, cuando termina,
+las guarda en un CSV propio dentro de la carpeta data/. Solo se guardan las
+muestras tomadas con el robot en movimiento, es decir, cuando la mayor
+velocidad absoluta de sus articulaciones supera MOTION_VELOCITY_THRESHOLD. Los
+periodos en reposo (antes de arrancar, al terminar o en una pausa) se
+descartan.
 
 En /joint_states publican dos nodos: joint_state_broadcaster (el brazo, a
 unos 500 Hz) y rg2_control_node (la pinza). Los mensajes de la pinza se
@@ -23,6 +27,7 @@ import csv
 from dataclasses import dataclass
 import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from practica1.trajectory_contract import NO_TRAJECTORY, TRAJECTORY_QOS, TRAJECTORY_TOPIC
 import rclpy
@@ -33,7 +38,7 @@ from std_msgs.msg import String
 
 NODE_NAME = 'kinematics_recorder'
 JOINT_STATES_TOPIC = '/joint_states'
-QUEUE_SIZE = 10
+QUEUE_SIZE = 100
 ARM_JOINT_NAMES = (
     'shoulder_pan_joint',
     'shoulder_lift_joint',
@@ -44,7 +49,9 @@ ARM_JOINT_NAMES = (
 )
 PRINT_PERIOD_SEC = 1.0
 NANOSECONDS_PER_SECOND = 1e9
+MOTION_VELOCITY_THRESHOLD = 1e-3
 OUTPUT_DIR = 'data'
+LOCAL_TIMEZONE = 'Europe/Madrid'
 
 
 @dataclass(frozen=True)
@@ -62,9 +69,10 @@ class KinematicsRecorder(Node):
     Nodo que registra posición, velocidad y aceleración de las articulaciones.
 
     Conserva el último estado y el anterior, que hace falta para calcular la
-    aceleración, y acumula las muestras de la trayectoria en curso para
-    guardarlas en un CSV cuando termina. Un temporizador muestra el último
-    estado en el log cada PRINT_PERIOD_SEC segundos para no saturar la salida.
+    aceleración, y sabe si el robot está en movimiento. Durante cada
+    trayectoria acumula solo las muestras tomadas en movimiento y las guarda en
+    un CSV cuando termina. Un temporizador muestra el último estado en el log
+    cada PRINT_PERIOD_SEC segundos para no saturar la salida.
     """
 
     def __init__(self) -> None:
@@ -79,6 +87,7 @@ class KinematicsRecorder(Node):
         self.output_dir: Path = Path(OUTPUT_DIR)
         self.samples: list[KinematicSample] = []
         self.current_trajectory: str | None = None
+        self.moving: bool = False
         self.create_subscription(
             JointState,
             JOINT_STATES_TOPIC,
@@ -95,12 +104,17 @@ class KinematicsRecorder(Node):
 
     def _on_joint_state(self, estado: JointState) -> None:
         """
-        Guarda el estado de un mensaje del brazo y calcula su aceleración.
+        Procesa un mensaje del brazo y lo guarda si el robot se está moviendo.
 
         Los mensajes de la pinza se descartan. Los valores se reordenan según
         ARM_JOINT_NAMES, porque el mensaje trae los nombres en orden alfabético.
         Antes de sobrescribirlos, la velocidad y el instante actuales pasan a
         ser los anteriores, que son los que usa el cálculo de la aceleración.
+
+        La aceleración y el estado de movimiento se actualizan con todos los
+        mensajes, también en reposo, y solo se filtra lo que se guarda. Así, la
+        primera muestra en movimiento se calcula con la inmediatamente anterior
+        y no con una de hace varios segundos.
 
         Parameters
         ----------
@@ -118,7 +132,12 @@ class KinematicsRecorder(Node):
         self.prev_stamp_sec = self.stamp_sec
         self.stamp_sec = stamp.sec + stamp.nanosec / NANOSECONDS_PER_SECOND
         self._compute_accelerations()
-        if self.current_trajectory is not None and self.accelerations is not None:
+        self._update_motion_state()
+        if (
+            self.current_trajectory is not None and
+            self.accelerations is not None and
+            self.moving
+        ):
             sample = KinematicSample(
                 time_sec=self.stamp_sec,
                 positions=self.positions,
@@ -140,6 +159,29 @@ class KinematicsRecorder(Node):
             ]
         else:
             self.accelerations = None
+
+    def _update_motion_state(self) -> None:
+        """
+        Actualiza si el robot está en movimiento y avisa en el log cuando cambia.
+
+        El robot se mueve si la mayor velocidad absoluta de sus articulaciones
+        supera MOTION_VELOCITY_THRESHOLD: basta con que se mueva una. Solo se
+        escribe en el log al arrancar o al detenerse, no con cada mensaje. A
+        unos 500 mensajes por segundo, escribir siempre ralentiza el callback y
+        hace que se pierdan mensajes.
+        """
+        if max(abs(joint_vel) for joint_vel in self.velocities) > MOTION_VELOCITY_THRESHOLD:
+            if not self.moving:
+                self.get_logger().info(
+                    'El robot empieza a moverse'
+                )
+            self.moving = True
+        else:
+            if self.moving:
+                self.get_logger().info(
+                    'El robot se ha detenido'
+                )
+            self.moving = False
 
     def _on_trajectory_change(self, mensaje: String) -> None:
         """
@@ -182,10 +224,12 @@ class KinematicsRecorder(Node):
         Guarda en un CSV las muestras de la trayectoria en curso.
 
         El fichero se crea en la carpeta data/ con el nombre de la trayectoria
-        y la fecha y hora, para no sobrescribir ejecuciones anteriores. Tiene
-        una fila por muestra: el instante de la medida y, para cada
-        articulación, su posición, su velocidad y su aceleración. Si no hay
-        muestras, no se crea ningún fichero.
+        y la fecha y hora de España, para no sobrescribir ejecuciones
+        anteriores. Se usa la zona horaria de forma explícita porque el
+        contenedor funciona en UTC. Tiene una fila por cada muestra en
+        movimiento: el instante de la medida y, para cada articulación, su
+        posición, su velocidad y su aceleración. Si no hay muestras, no se crea
+        ningún fichero.
         """
         if not self.samples:
             self.get_logger().info(
@@ -196,7 +240,7 @@ class KinematicsRecorder(Node):
         ruta = self.output_dir / (
             self.current_trajectory +
             '_' +
-            datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S') +
+            datetime.datetime.now(ZoneInfo(LOCAL_TIMEZONE)).strftime('%Y-%m-%d_%H-%M-%S') +
             '.csv'
         )
         header = (
