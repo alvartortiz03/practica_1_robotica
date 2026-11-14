@@ -2,7 +2,7 @@
 
 Práctica 1 de Robótica y Automatización Inteligente (Máster en Computación y Sistemas Inteligentes, Universidad de Deusto): extracción y análisis de datos cinemáticos del robot UR3e con ROS 2 Jazzy.
 
-El robot simulado ejecuta varias trayectorias (Joint, Lineal y Circular). Mientras tanto, un nodo suscrito al estado de las articulaciones registra la posición, la velocidad y la aceleración de cada articulación junto con su marca de tiempo, y guarda los datos de cada trayectoria por separado.
+El robot simulado ejecuta varias trayectorias (Joint, Lineal y Circular). Mientras tanto, un nodo suscrito al estado de las articulaciones registra la posición, la velocidad y la aceleración de cada articulación junto con su marca de tiempo, y guarda los datos de cada trayectoria por separado. Además publica cada estado calculado con un mensaje ROS 2 propio.
 
 ## Estado
 
@@ -13,7 +13,7 @@ El robot simulado ejecuta varias trayectorias (Joint, Lineal y Circular). Mientr
 | Ejecutor de trayectorias Joint y Lineal | En desarrollo |
 | Trayectoria Circular y fichero launch | En desarrollo |
 | Opcional: guardar solo cuando el robot se mueve | Hecho |
-| Opcional: mensaje ROS 2 propio | En desarrollo |
+| Opcional: mensaje ROS 2 propio (`KinematicState`) | Hecho |
 
 ## Estructura del repositorio
 
@@ -22,6 +22,11 @@ practica_1_robotica/
 ├── README.md
 ├── .gitignore                    # Ignora __pycache__/, *.pyc y data/
 ├── data/                         # CSV generados (no se suben al repositorio)
+├── practica1_interfaces/         # Paquete ROS 2 de tipo ament_cmake con los mensajes propios
+│   ├── msg/KinematicState.msg    # Definición del mensaje
+│   ├── CMakeLists.txt            # Genera el código del mensaje (rosidl_generate_interfaces)
+│   ├── package.xml               # Dependencias; lo declara paquete de interfaces
+│   └── LICENSE
 └── practica1/                    # Paquete ROS 2 de tipo ament_python
     ├── package.xml               # Nombre, versión y dependencias del paquete
     ├── setup.py                  # Instalación; en entry_points se registran los ejecutables
@@ -45,11 +50,13 @@ Dentro del contenedor:
 
 ```bash
 cd ~/ros_workspace
-colcon build --symlink-install --packages-select practica1
+colcon build --symlink-install --packages-up-to practica1
 source install/setup.bash
 ```
 
-Con `--symlink-install`, los cambios en ficheros `.py` se aplican sin recompilar. Sí hay que recompilar al modificar `setup.py` o `package.xml`.
+`--packages-up-to` compila `practica1` y los paquetes de los que depende, incluido `practica1_interfaces`. Con `--packages-select practica1` no se compilaría el mensaje y el nodo no arrancaría.
+
+Con `--symlink-install`, los cambios en ficheros `.py` se aplican sin recompilar. Sí hay que recompilar al modificar `setup.py`, `package.xml` o el `.msg`.
 
 ## Ejecución
 
@@ -89,6 +96,7 @@ ros2 topic pub --once -w 1 --qos-durability transient_local --qos-reliability re
 |---|---|---|
 | `/joint_states` | `sensor_msgs/msg/JointState` | Estado de las articulaciones (suscripción) |
 | `/current_trajectory` | `std_msgs/msg/String` | Avisos de inicio y fin de trayectoria (suscripción) |
+| `/kinematic_state` | `practica1_interfaces/msg/KinematicState` | Estado cinemático calculado, unos 500 por segundo (publicación) |
 
 Funcionamiento:
 
@@ -101,6 +109,28 @@ Funcionamiento:
 - Solo guarda las muestras tomadas **con el robot en movimiento**, es decir, cuando la mayor velocidad absoluta de sus articulaciones supera `MOTION_VELOCITY_THRESHOLD` (0,001 rad/s). En simulación, el robot quieto da velocidad 0 exacta y en movimiento alcanza décimas de rad/s, así que el umbral separa ambos casos con margen sin depender de un 0 exacto, que un robot real no daría por el ruido. Los periodos en reposo se descartan: antes de arrancar, al terminar y en las pausas entre movimientos. La aceleración se sigue calculando con todos los mensajes; solo se filtra lo que se guarda.
 - En el log solo se avisa cuando el robot empieza a moverse o se detiene, no con cada mensaje: con unos 500 mensajes por segundo, escribir siempre ralentiza el nodo y hace que se pierdan mensajes.
 - La suscripción a `/joint_states` tiene una cola de 100 mensajes (unos 200 ms a 500 Hz). Así, si el nodo está ocupado un momento, los mensajes esperan en la cola en lugar de perderse.
+
+### Mensaje propio `KinematicState`
+
+El nodo publica en `/kinematic_state`, con el mensaje `practica1_interfaces/msg/KinematicState`, cada estado para el que ya tiene aceleración: unos 500 mensajes por segundo. Publica siempre, también en reposo y sin trayectoria; el campo `moving` indica si el robot se mueve. El filtro de movimiento solo afecta a lo que se guarda en los CSV.
+
+| Campo | Tipo | Contenido |
+|---|---|---|
+| `header` | `std_msgs/Header` | `stamp` es el instante de la medida, copiado sin modificar de `/joint_states` |
+| `joint_names` | `string[]` | Nombres de las articulaciones, de la base a la muñeca |
+| `position` | `float64[]` | Posición de cada articulación (rad) |
+| `velocity` | `float64[]` | Velocidad de cada articulación (rad/s) |
+| `acceleration` | `float64[]` | Aceleración de cada articulación (rad/s²), por diferencias finitas |
+| `trajectory` | `string` | Trayectoria en curso, o `''` si no hay ninguna |
+| `moving` | `bool` | `true` si la mayor velocidad absoluta supera `MOTION_VELOCITY_THRESHOLD` |
+
+Las listas `position`, `velocity` y `acceleration` van en paralelo con `joint_names`. Para verlo:
+
+```bash
+ros2 interface show practica1_interfaces/msg/KinematicState
+ros2 topic echo /kinematic_state --once
+ros2 topic hz /kinematic_state
+```
 
 ### Contrato de avisos (`trajectory_contract.py`)
 
@@ -127,11 +157,11 @@ Las articulaciones aparecen en este orden: `shoulder_pan_joint`, `shoulder_lift_
 
 ```bash
 cd ~/ros_workspace
-colcon test --packages-select practica1
+colcon test --packages-select practica1 practica1_interfaces
 colcon test-result --verbose
 ```
 
-Los tests comprueban PEP 8 con `flake8` (comillas simples, líneas de 99 caracteres como máximo y orden de imports) y el formato de los docstrings con `pep257`.
+En `practica1`, los tests comprueban PEP 8 con `flake8` (comillas simples, líneas de 99 caracteres como máximo y orden de imports) y el formato de los docstrings con `pep257`. En `practica1_interfaces` comprueban el formato de `CMakeLists.txt` y la validez de `package.xml`.
 
 ## Limitaciones conocidas
 

@@ -17,6 +17,10 @@ velocidad absoluta de sus articulaciones supera MOTION_VELOCITY_THRESHOLD. Los
 periodos en reposo (antes de arrancar, al terminar o en una pausa) se
 descartan.
 
+En paralelo, cada estado calculado se publica en KINEMATIC_STATE_TOPIC con el
+mensaje propio practica1_interfaces/KinematicState, que empaqueta en un solo
+mensaje la posición, la velocidad y la aceleración de las seis articulaciones.
+
 En /joint_states publican dos nodos: joint_state_broadcaster (el brazo, a
 unos 500 Hz) y rg2_control_node (la pinza). Los mensajes de la pinza se
 descartan y, como los nombres llegan en orden alfabético, cada valor se
@@ -29,7 +33,9 @@ import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from builtin_interfaces.msg import Time
 from practica1.trajectory_contract import NO_TRAJECTORY, TRAJECTORY_QOS, TRAJECTORY_TOPIC
+from practica1_interfaces.msg import KinematicState
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -38,6 +44,7 @@ from std_msgs.msg import String
 
 NODE_NAME = 'kinematics_recorder'
 JOINT_STATES_TOPIC = '/joint_states'
+KINEMATIC_STATE_TOPIC = '/kinematic_state'
 QUEUE_SIZE = 100
 ARM_JOINT_NAMES = (
     'shoulder_pan_joint',
@@ -71,12 +78,13 @@ class KinematicsRecorder(Node):
     Conserva el último estado y el anterior, que hace falta para calcular la
     aceleración, y sabe si el robot está en movimiento. Durante cada
     trayectoria acumula solo las muestras tomadas en movimiento y las guarda en
-    un CSV cuando termina. Un temporizador muestra el último estado en el log
-    cada PRINT_PERIOD_SEC segundos para no saturar la salida.
+    un CSV cuando termina. Cada estado calculado se publica además con el
+    mensaje propio KinematicState. Un temporizador muestra el último estado en
+    el log cada PRINT_PERIOD_SEC segundos para no saturar la salida.
     """
 
     def __init__(self) -> None:
-        """Inicializa el estado del nodo, sus dos suscripciones y el temporizador."""
+        """Inicializa el estado del nodo, sus suscripciones, su publicador y el timer."""
         super().__init__(NODE_NAME)
         self.positions: list[float] | None = None
         self.velocities: list[float] | None = None
@@ -100,6 +108,11 @@ class KinematicsRecorder(Node):
             self._on_trajectory_change,
             TRAJECTORY_QOS
         )
+        self.kinematic_state_publisher = self.create_publisher(
+            KinematicState,
+            KINEMATIC_STATE_TOPIC,
+            QUEUE_SIZE
+        )
         self.create_timer(PRINT_PERIOD_SEC, self._log_latest_state)
 
     def _on_joint_state(self, estado: JointState) -> None:
@@ -114,7 +127,8 @@ class KinematicsRecorder(Node):
         La aceleración y el estado de movimiento se actualizan con todos los
         mensajes, también en reposo, y solo se filtra lo que se guarda. Así, la
         primera muestra en movimiento se calcula con la inmediatamente anterior
-        y no con una de hace varios segundos.
+        y no con una de hace varios segundos. En cuanto hay aceleración, el
+        estado se publica con KinematicState, esté o no el robot en movimiento.
 
         Parameters
         ----------
@@ -133,6 +147,8 @@ class KinematicsRecorder(Node):
         self.stamp_sec = stamp.sec + stamp.nanosec / NANOSECONDS_PER_SECOND
         self._compute_accelerations()
         self._update_motion_state()
+        if self.accelerations is not None:
+            self._publish_kinematic_state(stamp)
         if (
             self.current_trajectory is not None and
             self.accelerations is not None and
@@ -182,6 +198,33 @@ class KinematicsRecorder(Node):
                     'El robot se ha detenido'
                 )
             self.moving = False
+
+    def _publish_kinematic_state(self, stamp: Time) -> None:
+        """
+        Publica el último estado calculado del brazo con el mensaje KinematicState.
+
+        Se publica con cada mensaje del brazo, también en reposo: el campo moving
+        indica si el robot se mueve, para que quien lo reciba decida qué hacer.
+
+        Parameters
+        ----------
+        stamp : Time
+            Instante de la medida, copiado tal cual de la cabecera del mensaje de
+            /joint_states (sin pasar por float, así que es exacto).
+
+        """
+        message = KinematicState()
+        message.header.stamp = stamp
+        message.joint_names = list(ARM_JOINT_NAMES)
+        message.position = self.positions
+        message.velocity = self.velocities
+        message.acceleration = self.accelerations
+        # Un campo string no admite None: sin trayectoria se envía NO_TRAJECTORY ('').
+        message.trajectory = (
+            self.current_trajectory if self.current_trajectory is not None else NO_TRAJECTORY
+        )
+        message.moving = self.moving
+        self.kinematic_state_publisher.publish(message)
 
     def _on_trajectory_change(self, mensaje: String) -> None:
         """

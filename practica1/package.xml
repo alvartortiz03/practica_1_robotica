@@ -7,6 +7,8 @@
   <maintainer email="alvartomas.ortiz@opendeusto.es">laboratorio</maintainer>
   <license>Apache-2.0</license>
 
+  <depend>builtin_interfaces</depend>
+  <depend>practica1_interfaces</depend>
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
