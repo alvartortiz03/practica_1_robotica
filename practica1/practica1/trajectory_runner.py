@@ -9,12 +9,14 @@ movimiento fallara, para que el registrador cierre siempre la trayectoria.
 """
 
 from collections.abc import Callable
+import copy
 import math
 import time
 
 from practica1.robot_controller import ControlRobot
 from practica1.trajectory_contract import (
     JOINT_TRAJECTORY,
+    LINEAR_TRAJECTORY,
     NO_TRAJECTORY,
     TRAJECTORY_QOS,
     TRAJECTORY_TOPIC,
@@ -27,6 +29,7 @@ PERIODO_COMPROBACION_SEG = 0.1
 PAUSA_CIERRE_SEG = 0.5
 POSTURA_INICIO = [0.0, -math.pi / 2, -math.pi / 2, -math.pi / 2, math.pi / 2, 0.0]
 POSTURA_DESTINO_JOINT = [1.0, -1.2, -math.pi / 2, -math.pi / 2, math.pi / 2, 0.5]
+DISTANCIA_LINEAL_M = 0.10
 
 
 class EjecutorTrayectorias:
@@ -109,10 +112,31 @@ class EjecutorTrayectorias:
             lambda: self._robot.mover_articulaciones(POSTURA_DESTINO_JOINT),
         )
 
+    def _trayectoria_lineal(self) -> None:
+        """
+        Ejecuta la trayectoria lineal: baja la punta del robot en línea 
+        recta sin cambiar su inclinación.
+
+        Primero lleva el robot a POSTURA_INICIO en silencio. A partir de 
+        la pose actual del extremo, calcula un nuevo punto justo debajo reduciendo 
+        su altura, Z, de modo que el extremo solo se desplaza en vertical.
+        """
+        if not self._robot.mover_articulaciones(POSTURA_INICIO):
+            self._log.error('No se ha podido llevar el robot a la postura de inicio')
+            return
+        # Se copia la pose para no modificar la que guarda ControlRobot
+        destino = copy.deepcopy(self._robot.pose_actual())
+        destino.position.z -= DISTANCIA_LINEAL_M
+        self._ejecutar_trayectoria(
+            LINEAR_TRAJECTORY,
+            lambda: self._robot.mover_trayectoria([destino]),
+        )
+
     def ejecutar(self) -> None:
         """Ejecuta todas las trayectorias, una detrás de otra."""
         self._esperar_registrador()
         self._trayectoria_joint()
+        self._trayectoria_lineal()
 
     def cerrar(self) -> None:
         """Deja salir el último aviso y cierra el nodo del robot."""
