@@ -9,16 +9,24 @@ movimiento fallara, para que el registrador cierre siempre la trayectoria.
 """
 
 from collections.abc import Callable
+import math
 import time
 
 from practica1.robot_controller import ControlRobot
-from practica1.trajectory_contract import NO_TRAJECTORY, TRAJECTORY_QOS, TRAJECTORY_TOPIC
+from practica1.trajectory_contract import (
+    JOINT_TRAJECTORY,
+    NO_TRAJECTORY,
+    TRAJECTORY_QOS,
+    TRAJECTORY_TOPIC,
+)
 import rclpy
 from std_msgs.msg import String
 
 ESPERA_REGISTRADOR_SEG = 5.0
 PERIODO_COMPROBACION_SEG = 0.1
 PAUSA_CIERRE_SEG = 0.5
+POSTURA_INICIO = [0.0, -math.pi / 2, -math.pi / 2, -math.pi / 2, math.pi / 2, 0.0]
+POSTURA_DESTINO_JOINT = [1.0, -1.2, -math.pi / 2, -math.pi / 2, math.pi / 2, 0.5]
 
 
 class EjecutorTrayectorias:
@@ -84,9 +92,27 @@ class EjecutorTrayectorias:
             self._avisar(NO_TRAJECTORY)
         return exito
 
+    def _trayectoria_joint(self) -> None:
+        """
+        Ejecuta la trayectoria Joint: de POSTURA_INICIO a POSTURA_DESTINO_JOINT.
+
+        El robot va primero a la postura de inicio sin avisar, para que esa
+        aproximación no se grabe. Solo el movimiento hasta el destino se
+        ejecuta con aviso, y es el que guarda el registrador.
+        """
+        if not self._robot.mover_articulaciones(POSTURA_INICIO):
+            self._log.error('No se ha podido llevar el robot a la postura de inicio')
+            return
+        # lambda retrasa el movimiento hasta que _ejecutar_trayectoria haya avisado
+        self._ejecutar_trayectoria(
+            JOINT_TRAJECTORY,
+            lambda: self._robot.mover_articulaciones(POSTURA_DESTINO_JOINT),
+        )
+
     def ejecutar(self) -> None:
         """Ejecuta todas las trayectorias, una detrás de otra."""
         self._esperar_registrador()
+        self._trayectoria_joint()
 
     def cerrar(self) -> None:
         """Deja salir el último aviso y cierra el nodo del robot."""
