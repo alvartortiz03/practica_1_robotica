@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'kinematics_recorder = practica1.kinematics_recorder:main',
+            'trajectory_runner = practica1.trajectory_runner:main',
         ],
     },
 )
