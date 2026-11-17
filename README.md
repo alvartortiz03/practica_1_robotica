@@ -10,8 +10,8 @@ El robot simulado ejecuta varias trayectorias (Joint, Lineal y Circular). Mientr
 |---|---|
 | Registrador cinemático (`kinematics_recorder`) | Hecho |
 | Contrato de avisos de trayectoria (`trajectory_contract.py`) | Hecho |
-| Ejecutor de trayectorias Joint y Lineal | En desarrollo |
-| Trayectoria Circular y fichero launch | En desarrollo |
+| Ejecutor de trayectorias Joint y Lineal (`trajectory_runner`) | Hecho |
+| Trayectoria Circular y fichero launch | Hecho |
 | Opcional: guardar solo cuando el robot se mueve | Hecho |
 | Opcional: mensaje ROS 2 propio (`KinematicState`) | Hecho |
 
@@ -32,11 +32,14 @@ practica_1_robotica/
     ├── setup.py                  # Instalación; en entry_points se registran los ejecutables
     ├── setup.cfg                 # Dónde se instalan los ejecutables para que ros2 run los encuentre
     ├── resource/practica1        # Marcador vacío para que ROS 2 encuentre el paquete
+    ├── launch/                   # practica1.launch.py: arranca el registrador y el ejecutor
     ├── test/                     # Tests de estilo (flake8, pep257) y de copyright
     └── practica1/                # Módulo Python con el código
         ├── __init__.py
         ├── kinematics_recorder.py   # Nodo registrador
-        └── trajectory_contract.py   # Topic, QoS y valores de los avisos de trayectoria
+        ├── robot_controller.py      # Control del robot con MoveIt 2 (clase ControlRobot)
+        ├── trajectory_contract.py   # Topic, QoS y valores de los avisos de trayectoria
+        └── trajectory_runner.py     # Nodo ejecutor de trayectorias
 ```
 
 ## Requisitos
@@ -69,16 +72,24 @@ Con `--symlink-install`, los cambios en ficheros `.py` se aplican sin recompilar
 
    o, dentro del contenedor, `ros2 launch launcher_robots_lab_robotica sim_203.launch.py`.
 
-2. Lanzar el registrador desde la raíz de este repositorio, para que los CSV se guarden en su carpeta `data/`:
+2. Lanzar el registrador y el ejecutor con el fichero launch, desde la raíz de este repositorio para que los CSV se guarden en su carpeta `data/`:
 
    ```bash
    cd ~/ros_workspace/src/practica_1_robotica
-   ros2 run practica1 kinematics_recorder
+   ros2 launch practica1 practica1.launch.py
    ```
 
-3. Ejecutar las trayectorias. Pendiente: el ejecutor está en desarrollo.
+   El robot ejecuta las trayectorias Joint, Lineal y Circular, y el registrador guarda un CSV por cada una. El ejecutor termina solo al acabar la última y el registrador sigue activo hasta que se pulse Ctrl+C.
 
-Mientras tanto, se pueden simular los avisos del ejecutor desde otro terminal y mover el robot desde RViz:
+También se pueden lanzar los dos nodos por separado, cada uno en un terminal y el registrador primero:
+
+```bash
+cd ~/ros_workspace/src/practica_1_robotica
+ros2 run practica1 kinematics_recorder     # Terminal 1
+ros2 run practica1 trajectory_runner       # Terminal 2
+```
+
+Para probar el registrador sin el ejecutor, se pueden simular sus avisos desde otro terminal y mover el robot desde RViz:
 
 ```bash
 # Empieza una trayectoria
@@ -153,6 +164,37 @@ Un fichero por trayectoria en `data/`, con el nombre `<trayectoria>_<AAAA-MM-DD_
 
 Las articulaciones aparecen en este orden: `shoulder_pan_joint`, `shoulder_lift_joint`, `elbow_joint`, `wrist_1_joint`, `wrist_2_joint`, `wrist_3_joint`. En total son 19 columnas y una fila por cada mensaje recibido con el robot en movimiento (unas 500 por segundo). Como las muestras en reposo no se guardan, si la trayectoria tiene una pausa la columna `time_sec` da un salto en ese punto.
 
+## Nodo `trajectory_runner`
+
+Mueve el robot con MoveIt 2 y avisa al registrador de qué trayectoria se está ejecutando, siguiendo el contrato de avisos.
+
+| Topic | Tipo | Uso |
+|---|---|---|
+| `/current_trajectory` | `std_msgs/msg/String` | Avisos de inicio y fin de trayectoria (publicación) |
+| `/joint_states` | `sensor_msgs/msg/JointState` | Postura actual del robot (suscripción) |
+
+Trayectorias que ejecuta, en este orden:
+
+| Trayectoria | Aviso | Movimiento | Cómo se ejecuta |
+|---|---|---|---|
+| Joint | `'joint'` | De `POSTURA_INICIO` a `POSTURA_DESTINO_JOINT`: giran la base (0 → 1 rad), el hombro (−π/2 → −1,2 rad) y la muñeca 3 (0 → 0,5 rad) | `mover_articulaciones`: MoveIt planifica hasta la postura de destino |
+| Lineal | `'linear'` | El extremo baja 10 cm en vertical (`DISTANCIA_LINEAL_M`) sin cambiar su orientación | `mover_trayectoria` con una sola pose de destino |
+| Circular | `'circular'` | El extremo recorre una circunferencia horizontal de 5 cm de radio (`RADIO_CIRCULO_M`) y vuelve al punto de salida | `mover_trayectoria` con 36 poses (`PUNTOS_CIRCULO`) |
+
+Funcionamiento:
+
+- El nodo que mueve el robot es `ControlRobot` (`robot_controller.py`). La clase `EjecutorTrayectorias` lo usa y crea sobre él el publicador de avisos, así que todo funciona con un solo nodo.
+- Antes de la primera trayectoria espera hasta 5 s (`ESPERA_REGISTRADOR_SEG`) a que haya algún nodo suscrito a `/current_trajectory`, para que el registrador no pierda el principio. Si no aparece ninguno, lo avisa en el log y continúa.
+- Las tres trayectorias parten de `POSTURA_INICIO`. El robot va hasta ella sin avisar, de modo que esa aproximación no se guarda en ningún CSV.
+- Cada trayectoria sigue la secuencia del contrato: publica su nombre, ejecuta el movimiento esperando a que termine y publica `''`. El aviso de fin va en un bloque `finally`, así que se publica también si el movimiento falla; de este modo el registrador cierra siempre la trayectoria.
+- Las trayectorias Lineal y Circular usan el servicio `compute_cartesian_path` de MoveIt, que calcula un camino en línea recta entre poses con pasos de 1 cm como máximo (`PASO_CARTESIANO_M`). Si MoveIt no puede calcular el camino completo, el robot no se mueve y la trayectoria se da por fallida.
+- El MoveIt del entorno solo tiene el planificador OMPL, que no ofrece un movimiento circular. Por eso la circunferencia se recorre como 36 tramos rectos, uno cada 10°, de menos de 1 cm cada uno. El centro se coloca a un radio de distancia del extremo, así el círculo empieza y termina donde ya está el robot.
+- Cuando acaba la última trayectoria, el nodo se cierra solo.
+
+### Fichero launch
+
+`practica1.launch.py` arranca `kinematics_recorder` y `trajectory_runner` con una sola orden. La simulación no forma parte del launch y se lanza antes, por separado. El launch no garantiza que el registrador arranque antes que el ejecutor; de eso se encarga la espera inicial del ejecutor.
+
 ## Calidad del código
 
 ```bash
@@ -167,3 +209,5 @@ En `practica1`, los tests comprueban PEP 8 con `flake8` (comillas simples, líne
 
 - **Picos de aceleración.** La aceleración calculada entre dos mensajes consecutivos (unos 2 ms) es sensible al ruido. El hardware simulado no se ejecuta en tiempo real: cuando un ciclo de control se retrasa, la velocidad publicada da un pequeño salto, y al dividirlo entre 2 ms aparecen picos de aceleración que no son reales. Calcularla sobre una ventana de 20 a 50 ms reduce mucho esos picos.
 - **Paradas breves.** El filtro de movimiento decide muestra a muestra. Si una trayectoria frena casi a 0 durante un instante, por ejemplo en una esquina de un camino cartesiano, esas pocas muestras no se guardan.
+- **Círculo aproximado.** La trayectoria Circular es en realidad un polígono de 36 lados. Con 5 cm de radio, se separa de la circunferencia menos de 0,2 mm.
+- **El registrador no termina solo.** Al lanzar con el fichero launch, el ejecutor acaba tras la última trayectoria, pero el registrador sigue activo hasta que se pulse Ctrl+C.
