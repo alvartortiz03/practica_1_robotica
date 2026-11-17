@@ -13,8 +13,10 @@ import copy
 import math
 import time
 
+from geometry_msgs.msg import Pose
 from practica1.robot_controller import ControlRobot
 from practica1.trajectory_contract import (
+    CIRCULAR_TRAJECTORY,
     JOINT_TRAJECTORY,
     LINEAR_TRAJECTORY,
     NO_TRAJECTORY,
@@ -30,6 +32,8 @@ PAUSA_CIERRE_SEG = 0.5
 POSTURA_INICIO = [0.0, -math.pi / 2, -math.pi / 2, -math.pi / 2, math.pi / 2, 0.0]
 POSTURA_DESTINO_JOINT = [1.0, -1.2, -math.pi / 2, -math.pi / 2, math.pi / 2, 0.5]
 DISTANCIA_LINEAL_M = 0.10
+RADIO_CIRCULO_M = 0.05
+PUNTOS_CIRCULO = 36
 
 
 class EjecutorTrayectorias:
@@ -114,11 +118,10 @@ class EjecutorTrayectorias:
 
     def _trayectoria_lineal(self) -> None:
         """
-        Ejecuta la trayectoria lineal: baja la punta del robot en línea 
-        recta sin cambiar su inclinación.
+        Ejecuta la trayectoria lineal: baja la punta en línea recta sin inclinarla.
 
-        Primero lleva el robot a POSTURA_INICIO en silencio. A partir de 
-        la pose actual del extremo, calcula un nuevo punto justo debajo reduciendo 
+        Primero lleva el robot a POSTURA_INICIO en silencio. A partir de la
+        pose actual del extremo, calcula un nuevo punto justo debajo reduciendo
         su altura, Z, de modo que el extremo solo se desplaza en vertical.
         """
         if not self._robot.mover_articulaciones(POSTURA_INICIO):
@@ -132,11 +135,51 @@ class EjecutorTrayectorias:
             lambda: self._robot.mover_trayectoria([destino]),
         )
 
+    def _poses_circulo(self) -> list[Pose]:
+        """
+        Calcula los puntos de una circunferencia horizontal que empieza en la punta.
+
+        El centro se coloca a un radio de distancia de la punta, así el
+        círculo empieza y acaba donde ya está el robot.
+
+        Devuelve:
+            poses: lista de las poses, todas con la misma altura y orientación.
+        """
+        inicio = self._robot.pose_actual()
+        centro_x = inicio.position.x - RADIO_CIRCULO_M
+        centro_y = inicio.position.y
+        poses = []
+        # Se empieza en 1 y no en 0: en el ángulo 0 ya está el robot
+        for i in range(1, PUNTOS_CIRCULO + 1):
+            angulo = 2 * math.pi * i / PUNTOS_CIRCULO
+            pose = copy.deepcopy(inicio)
+            pose.position.x = centro_x + RADIO_CIRCULO_M * math.cos(angulo)
+            pose.position.y = centro_y + RADIO_CIRCULO_M * math.sin(angulo)
+            poses.append(pose)
+        return poses
+
+    def _trayectoria_circular(self) -> None:
+        """
+        Ejecuta la trayectoria Circular: la punta dibuja un círculo.
+
+        MoveIt no tiene aquí un movimiento circular, así que el círculo se
+        recorre como muchos tramos rectos cortos entre los puntos calculados.
+        """
+        if not self._robot.mover_articulaciones(POSTURA_INICIO):
+            self._log.error('No se ha podido llevar el robot a la postura de inicio')
+            return
+        poses = self._poses_circulo()
+        self._ejecutar_trayectoria(
+            CIRCULAR_TRAJECTORY,
+            lambda: self._robot.mover_trayectoria(poses),
+        )
+
     def ejecutar(self) -> None:
         """Ejecuta todas las trayectorias, una detrás de otra."""
         self._esperar_registrador()
         self._trayectoria_joint()
         self._trayectoria_lineal()
+        self._trayectoria_circular()
 
     def cerrar(self) -> None:
         """Deja salir el último aviso y cierra el nodo del robot."""
