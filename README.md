@@ -79,7 +79,7 @@ Con `--symlink-install`, los cambios en ficheros `.py` se aplican sin recompilar
    ros2 launch practica1 practica1.launch.py
    ```
 
-   El robot ejecuta las trayectorias Joint, Lineal y Circular, y el registrador guarda un CSV por cada una. El ejecutor termina solo al acabar la última y el registrador sigue activo hasta que se pulse Ctrl+C.
+   El robot ejecuta las trayectorias Joint, Lineal y Circular, y el registrador guarda un CSV por cada una. Al acabar la última, el ejecutor termina y el launch cierra también el registrador.
 
 También se pueden lanzar los dos nodos por separado, cada uno en un terminal y el registrador primero:
 
@@ -193,7 +193,7 @@ Funcionamiento:
 
 ### Fichero launch
 
-`practica1.launch.py` arranca `kinematics_recorder` y `trajectory_runner` con una sola orden. La simulación no forma parte del launch y se lanza antes, por separado. El launch no garantiza que el registrador arranque antes que el ejecutor; de eso se encarga la espera inicial del ejecutor.
+`practica1.launch.py` arranca `kinematics_recorder` y `trajectory_runner` con una sola orden. La simulación no forma parte del launch y se lanza antes, por separado. El launch no garantiza que el registrador arranque antes que el ejecutor; de eso se encarga la espera inicial del ejecutor. Cuando el ejecutor termina, un `OnProcessExit` cierra todo el launch, registrador incluido; para entonces ya ha guardado los CSV, porque cada uno se escribe al recibir el aviso de fin de su trayectoria.
 
 ## Calidad del código
 
@@ -210,4 +210,3 @@ En `practica1`, los tests comprueban PEP 8 con `flake8` (comillas simples, líne
 - **Picos de aceleración.** La aceleración calculada entre dos mensajes consecutivos (unos 2 ms) es sensible al ruido. El hardware simulado no se ejecuta en tiempo real: cuando un ciclo de control se retrasa, la velocidad publicada da un pequeño salto, y al dividirlo entre 2 ms aparecen picos de aceleración que no son reales. Calcularla sobre una ventana de 20 a 50 ms reduce mucho esos picos.
 - **Paradas breves.** El filtro de movimiento decide muestra a muestra. Si una trayectoria frena casi a 0 durante un instante, por ejemplo en una esquina de un camino cartesiano, esas pocas muestras no se guardan.
 - **Círculo aproximado.** La trayectoria Circular es en realidad un polígono de 36 lados. Con 5 cm de radio, se separa de la circunferencia menos de 0,2 mm.
-- **El registrador no termina solo.** Al lanzar con el fichero launch, el ejecutor acaba tras la última trayectoria, pero el registrador sigue activo hasta que se pulse Ctrl+C.
