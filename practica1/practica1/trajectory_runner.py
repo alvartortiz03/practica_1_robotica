@@ -3,9 +3,9 @@
 Nodo ejecutor de trayectorias del brazo UR3e.
 
 Mueve el robot con ControlRobot y avisa al registrador cinemático de qué
-trayectoria se está ejecutando: publica su nombre
-justo antes de empezarla y NO_TRAJECTORY en cuanto termina, también en caso de que
-movimiento fallara, para que el registrador cierre siempre la trayectoria.
+trayectoria se está ejecutando: publica su nombre justo antes de empezarla y
+NO_TRAJECTORY en cuanto termina, también si el movimiento falla, para que el
+registrador cierre siempre la trayectoria.
 """
 
 from collections.abc import Callable
@@ -72,7 +72,7 @@ class EjecutorTrayectorias:
                 return
             time.sleep(PERIODO_COMPROBACION_SEG)
 
-    def _ejecutar_trayectoria(self, nombre: str, movimiento: Callable[[], bool]) -> bool:
+    def _ejecutar_trayectoria(self, nombre: str, movimiento: Callable[[], bool]) -> None:
         """
         Avisa del inicio de una trayectoria, la ejecuta y avisa del final.
 
@@ -84,20 +84,14 @@ class EjecutorTrayectorias:
             nombre: nombre de la trayectoria, uno de los definidos en el contrato.
             movimiento: función sin parámetros que mueve el robot y devuelve si
                 el movimiento tuvo éxito.
-
-        Devuelve:
-            True si el movimiento tuvo éxito.
         """
         self._log.info(f'Empieza la trayectoria {nombre}')
         self._avisar(nombre)
-        exito = False
         try:
-            exito = movimiento()
-            if not exito:
+            if not movimiento():
                 self._log.error(f'La trayectoria {nombre} ha fallado')
         finally:
             self._avisar(NO_TRAJECTORY)
-        return exito
 
     def _trayectoria_joint(self) -> None:
         """
@@ -127,8 +121,7 @@ class EjecutorTrayectorias:
         if not self._robot.mover_articulaciones(POSTURA_INICIO):
             self._log.error('No se ha podido llevar el robot a la postura de inicio')
             return
-        # Se copia la pose para no modificar la que guarda ControlRobot
-        destino = copy.deepcopy(self._robot.pose_actual())
+        destino = self._robot.pose_actual()
         destino.position.z -= DISTANCIA_LINEAL_M
         self._ejecutar_trayectoria(
             LINEAR_TRAJECTORY,

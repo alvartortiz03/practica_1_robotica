@@ -5,17 +5,14 @@ import threading
 import time
 from typing import Any
 
-from control_msgs.action import GripperCommand
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (
     CollisionObject,
     Constraints,
     JointConstraint,
     MoveItErrorCodes,
-    OrientationConstraint,
     PlanningScene,
-    PositionConstraint,
     RobotState,
 )
 from moveit_msgs.srv import ApplyPlanningScene, GetCartesianPath
@@ -40,8 +37,6 @@ PERIODO_ESPERA_FUTURE_SEG = 0.01
 INTENTOS_PLANIFICACION = 10
 TIEMPO_PLANIFICACION_SEG = 5.0
 TOLERANCIA_ARTICULAR_RAD = 0.001
-TOLERANCIA_POSICION_M = 0.001
-TOLERANCIA_ORIENTACION_RAD = 0.01
 TIEMPO_ESPERA_TF_SEG = 5.0
 PASO_CARTESIANO_M = 0.01
 UMBRAL_SALTO = 0.0
@@ -67,12 +62,10 @@ class ControlRobot(Node):
             self.group_name = f'robot_{id_robot}'
             self.efector_final = f'{id_robot}_{EFECTOR_FINAL}'
             self.articulaciones = [f'{id_robot}_{j}' for j in ARTICULACIONES]
-            accion_pinza = f'robot_{id_robot}/rg2_action_server'
         else:
             self.group_name = GRUPO
             self.efector_final = EFECTOR_FINAL
             self.articulaciones = list(ARTICULACIONES)
-            accion_pinza = 'rg2_action_server'
         self._estado_articulaciones: dict[str, float] = {}
 
         self.create_subscription(JointState, '/joint_states', self._cb_joint_states, TAMAÑO_COLA)
@@ -83,7 +76,6 @@ class ControlRobot(Node):
         self.execute_client = ActionClient(self, ExecuteTrajectory, 'execute_trajectory')
         self.cartesian_client = self.create_client(GetCartesianPath, 'compute_cartesian_path')
         self.scene_client = self.create_client(ApplyPlanningScene, 'apply_planning_scene')
-        self.gripper_action_client = ActionClient(self, GripperCommand, accion_pinza)
 
         # Se atienden los callbacks (joint_states, tf, ...) en un hilo aparte
         self.ejecutor = MultiThreadedExecutor()
@@ -115,10 +107,6 @@ class ControlRobot(Node):
         while not future.done():
             time.sleep(PERIODO_ESPERA_FUTURE_SEG)
         return future.result()
-
-    def articulaciones_actuales(self) -> list[float]:
-        """Devuelve los ángulos actuales de las 6 articulaciones (rad)."""
-        return [self._estado_articulaciones[j] for j in self.articulaciones]
 
     def _ir_a(self, restricciones: Constraints, wait: bool) -> bool:
         """
@@ -181,44 +169,6 @@ class ControlRobot(Node):
         pose.position.z = transformacion.transform.translation.z
         pose.orientation = transformacion.transform.rotation
         return pose
-
-    def pose_a_stamped(self, pose: Pose) -> PoseStamped:
-        """Convierte una Pose en PoseStamped con el sistema de referencia del robot."""
-        pose_stamped = PoseStamped()
-        pose_stamped.header.frame_id = SISTEMA_REFERENCIA
-        pose_stamped.pose = pose
-        return pose_stamped
-
-    def mover_a_pose(self, pose_goal: Pose, wait: bool = True) -> bool:
-        """
-        Lleva el efector final a una pose (posición + orientación).
-
-        La trayectoria intermedia la decide el planificador (no es en línea recta).
-
-        Devuelve:
-            True: si el movimiento tuvo éxito.
-        """
-        restriccion_posicion = PositionConstraint()
-        restriccion_posicion.header.frame_id = SISTEMA_REFERENCIA
-        restriccion_posicion.link_name = self.efector_final
-        region = SolidPrimitive(type=SolidPrimitive.SPHERE, dimensions=[TOLERANCIA_POSICION_M])
-        restriccion_posicion.constraint_region.primitives.append(region)
-        restriccion_posicion.constraint_region.primitive_poses.append(pose_goal)
-        restriccion_posicion.weight = 1.0
-
-        restriccion_orientacion = OrientationConstraint()
-        restriccion_orientacion.header.frame_id = SISTEMA_REFERENCIA
-        restriccion_orientacion.link_name = self.efector_final
-        restriccion_orientacion.orientation = pose_goal.orientation
-        restriccion_orientacion.absolute_x_axis_tolerance = TOLERANCIA_ORIENTACION_RAD
-        restriccion_orientacion.absolute_y_axis_tolerance = TOLERANCIA_ORIENTACION_RAD
-        restriccion_orientacion.absolute_z_axis_tolerance = TOLERANCIA_ORIENTACION_RAD
-        restriccion_orientacion.weight = 1.0
-
-        restricciones = Constraints()
-        restricciones.position_constraints.append(restriccion_posicion)
-        restricciones.orientation_constraints.append(restriccion_orientacion)
-        return self._ir_a(restricciones, wait)
 
     def añadir_caja_a_escena_de_planificacion(
             self, pose_caja: Pose, name: str,
@@ -291,24 +241,3 @@ class ControlRobot(Node):
         pose_suelo.position.z = ALTURA_SUELO_M
         pose_suelo.orientation.w = 1.0
         self.añadir_caja_a_escena_de_planificacion(pose_suelo, 'suelo', TAMAÑO_SUELO_M)
-
-    def mover_pinza(self, anchura_dedos: float, fuerza: float) -> bool:
-        """
-        Abre o cierra la pinza.
-
-        Parámetros:
-            anchura_dedos: apertura de los dedos.
-            fuerza: esfuerzo máximo a aplicar.
-
-        Devuelve:
-            True si la pinza alcanzó la posición objetivo.
-        """
-        self.gripper_action_client.wait_for_server()
-        goal = GripperCommand.Goal()
-        goal.command.position = anchura_dedos
-        goal.command.max_effort = fuerza
-        goal_handle = self._esperar(self.gripper_action_client.send_goal_async(goal))
-        if not goal_handle.accepted:
-            return False
-        result = self._esperar(goal_handle.get_result_async()).result
-        return result.reached_goal
